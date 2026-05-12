@@ -86,10 +86,7 @@ export default function Home() {
 
   const inputRef = useRef<HTMLInputElement | null>(null);
 
-  const apiUrl = useMemo(
-    () => process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000",
-    []
-  );
+const apiUrl = "https://astromix-audio-api-689440192272.us-central1.run.app";
 
   const activeMode = modes.find((item) => item.id === mode) || modes[0];
 
