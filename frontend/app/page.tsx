@@ -17,48 +17,48 @@ const modes: { id: Mode; label: string; desc: string; output: string }[] = [
   {
     id: "final_master",
     label: "Final Master",
-    desc: "The finished WAV. Loud, clean, controlled, ready to send.",
-    output: "astroman-final-master.wav",
+    desc: "The finished master. Loud, clean, controlled, ready to send.",
+    output: "astroman-final-master.mp3",
   },
   {
     id: "vocal",
     label: "Vocal Polish",
     desc: "Clean, bright, forward lead vocal with space and pressure.",
-    output: "astroman-vocal-polish.wav",
+    output: "astroman-vocal-polish.mp3",
   },
   {
     id: "instrumental",
     label: "Instrumental Polish",
     desc: "Tighter low end, cleaner width, controlled master bus feel.",
-    output: "astroman-instrumental-polish.wav",
+    output: "astroman-instrumental-polish.mp3",
   },
   {
     id: "mix",
     label: "Full Mix Polish",
     desc: "Balanced final pass for a complete mix before export.",
-    output: "astroman-full-mix-polish.wav",
+    output: "astroman-full-mix-polish.mp3",
   },
 ];
 
 const modeCopy: Record<Mode, { cta: string; ready: string; preview: string }> = {
   final_master: {
-    cta: "Create Final WAV",
-    ready: "Your final WAV is ready",
+    cta: "Create Final Master",
+    ready: "Your final master is ready",
     preview: "Preview Final Master",
   },
   vocal: {
     cta: "Polish Vocal",
-    ready: "Your vocal WAV is ready",
+    ready: "Your vocal is ready",
     preview: "Preview Vocal Polish",
   },
   instrumental: {
     cta: "Polish Instrumental",
-    ready: "Your instrumental WAV is ready",
+    ready: "Your instrumental is ready",
     preview: "Preview Instrumental Polish",
   },
   mix: {
     cta: "Polish Full Mix",
-    ready: "Your mix WAV is ready",
+    ready: "Your mix is ready",
     preview: "Preview Full Mix",
   },
 };
@@ -162,7 +162,7 @@ export default function Home() {
             </div>
           </div>
           <div className="hidden rounded-full border border-white/10 px-4 py-2 text-sm text-white/60 sm:block">
-            v1.3.1
+            v1.4.0
           </div>
         </header>
 
@@ -170,7 +170,7 @@ export default function Home() {
           <div>
             <div className="inline-flex items-center gap-2 rounded-full border border-white/10 bg-white/[0.04] px-4 py-2 text-sm text-white/65">
               <Sparkles className="h-4 w-4" />
-              Upload. Process. Final WAV.
+              Upload. Process. Download.
             </div>
             <h2 className="mt-6 max-w-3xl text-5xl font-black tracking-[-0.06em] text-white sm:text-7xl lg:text-8xl">
               Turn raw audio into a finished master.
@@ -180,7 +180,7 @@ export default function Home() {
             </p>
             <div className="mt-8 grid gap-3 sm:grid-cols-3">
               <Metric label="Default" value="Final Master" />
-              <Metric label="Export" value="24-bit WAV" />
+              <Metric label="Export" value="320kbps MP3" />
               <Metric label="Modes" value="4 Engines" />
             </div>
           </div>
@@ -285,7 +285,7 @@ export default function Home() {
                   className="mt-4 flex w-full items-center justify-center gap-2 rounded-full border border-white/15 px-5 py-3 text-sm font-bold text-white transition hover:bg-white/10"
                 >
                   <Download className="h-4 w-4" />
-                  Download WAV
+                  Download MP3
                 </a>
               </div>
             )}
@@ -293,7 +293,7 @@ export default function Home() {
         </div>
 
         <footer className="flex flex-col gap-2 border-t border-white/10 pt-5 text-sm text-white/40 sm:flex-row sm:items-center sm:justify-between">
-          <p>Preset based engine. Final WAV export implemented.</p>
+          <p>Preset based engine. 320kbps MP3 export.</p>
           <p>Astroman Mixing Engine © 2026</p>
         </footer>
       </section>
