@@ -8,7 +8,7 @@ import numpy as np
 import soundfile as sf
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse, Response
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from scipy.signal import butter, sosfilt, sosfiltfilt
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -17,7 +17,7 @@ PROCESSED_DIR = BASE_DIR / "processed"
 TMP_DIR.mkdir(exist_ok=True)
 PROCESSED_DIR.mkdir(exist_ok=True)
 
-app = FastAPI(title="Astroman Audio Engine", version="1.2.0")
+app = FastAPI(title="Astroman Audio Engine", version="1.3.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -25,7 +25,7 @@ app.add_middleware(
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
-    expose_headers=["Content-Disposition"],
+    expose_headers=["Content-Disposition", "Content-Length"],
 )
 
 VALID_MODES = {"vocal", "instrumental", "mix", "final_master"}
@@ -57,7 +57,7 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "engine": "astroman-audio", "version": "1.2.0"}
+    return {"status": "ok", "engine": "astroman-audio", "version": "1.3.0"}
 
 
 @app.post("/process")
@@ -100,15 +100,30 @@ async def process_endpoint(file: UploadFile = File(...), mode: str = Form("final
 
         sf.write(output_path, processed, sr, subtype="PCM_24")
 
+        file_size = output_path.stat().st_size
+
         print(
-            f"PROCESS OK job={job_id} output={output_path.name} size={output_path.stat().st_size}",
+            f"PROCESS OK job={job_id} output={output_path.name} size={file_size}",
             flush=True,
         )
 
-        return FileResponse(
-            output_path,
+        def iter_file():
+            with open(output_path, "rb") as f:
+                while True:
+                    chunk = f.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    yield chunk
+
+        return StreamingResponse(
+            iter_file(),
             media_type="audio/wav",
-            filename=OUTPUT_NAMES[mode],
+            headers={
+                "Content-Disposition": f'attachment; filename="{OUTPUT_NAMES[mode]}"',
+                "Content-Length": str(file_size),
+                "Access-Control-Allow-Origin": "*",
+                "Access-Control-Expose-Headers": "Content-Disposition, Content-Length",
+            },
         )
 
     except subprocess.CalledProcessError as exc:
