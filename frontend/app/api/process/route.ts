@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 
 export const runtime = "nodejs";
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 const BACKEND_URL = "https://astromix-audio-api-689440192272.us-central1.run.app";
 
@@ -32,18 +32,19 @@ export async function POST(request: NextRequest) {
     }
 
     const audio = await response.arrayBuffer();
+    const disposition = response.headers.get("content-disposition") || 'attachment; filename="astroman-output.wav"';
 
     return new NextResponse(audio, {
       status: 200,
       headers: {
         "Content-Type": "audio/wav",
-        "Content-Disposition": 'attachment; filename="astroman-final-master.wav"',
+        "Content-Disposition": disposition,
       },
     });
   } catch (error) {
     return NextResponse.json(
       {
-        detail: error instanceof Error ? error.message : "Vercel proxy failed.",
+        detail: error instanceof Error ? error.message : "Proxy request failed.",
       },
       { status: 500 }
     );
