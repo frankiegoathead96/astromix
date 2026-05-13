@@ -1,6 +1,0 @@
-services:
-  - type: web
-    name: astroman-audio-backend
-    env: docker
-    plan: starter
-    healthCheckPath: /health
