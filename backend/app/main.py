@@ -8,7 +8,7 @@ import numpy as np
 import soundfile as sf
 from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from scipy.signal import butter, sosfilt, sosfiltfilt
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -17,7 +17,7 @@ PROCESSED_DIR = BASE_DIR / "processed"
 TMP_DIR.mkdir(exist_ok=True)
 PROCESSED_DIR.mkdir(exist_ok=True)
 
-app = FastAPI(title="Astroman Audio Engine", version="1.3.0")
+app = FastAPI(title="Astroman Audio Engine", version="1.4.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -30,10 +30,10 @@ app.add_middleware(
 
 VALID_MODES = {"vocal", "instrumental", "mix", "final_master"}
 OUTPUT_NAMES = {
-    "vocal": "astroman-vocal-polish.wav",
-    "instrumental": "astroman-instrumental-polish.wav",
-    "mix": "astroman-full-mix-polish.wav",
-    "final_master": "astroman-final-master.wav",
+    "vocal": "astroman-vocal-polish",
+    "instrumental": "astroman-instrumental-polish",
+    "mix": "astroman-full-mix-polish",
+    "final_master": "astroman-final-master",
 }
 
 
@@ -57,7 +57,7 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "engine": "astroman-audio", "version": "1.3.0"}
+    return {"status": "ok", "engine": "astroman-audio", "version": "1.4.0"}
 
 
 @app.post("/process")
@@ -71,7 +71,8 @@ async def process_endpoint(file: UploadFile = File(...), mode: str = Form("final
     job_id = uuid.uuid4().hex
     source_path = TMP_DIR / f"{job_id}_{safe_name(file.filename or 'upload')}"
     wav_path = TMP_DIR / f"{job_id}_input.wav"
-    output_path = PROCESSED_DIR / f"{job_id}_{OUTPUT_NAMES[mode]}"
+    output_wav = PROCESSED_DIR / f"{job_id}_{OUTPUT_NAMES[mode]}.wav"
+    output_mp3 = PROCESSED_DIR / f"{job_id}_{OUTPUT_NAMES[mode]}.mp3"
 
     try:
         with source_path.open("wb") as buffer:
@@ -98,32 +99,33 @@ async def process_endpoint(file: UploadFile = File(...), mode: str = Form("final
 
         processed = final_safety(processed, target_peak=0.92)
 
-        sf.write(output_path, processed, sr, subtype="PCM_24")
+        sf.write(output_wav, processed, sr, subtype="PCM_24")
 
-        file_size = output_path.stat().st_size
+        # Convert WAV to MP3 320kbps for delivery (WAV is too large for Cloud Run response)
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-i", str(output_wav),
+                "-codec:a", "libmp3lame",
+                "-b:a", "320k",
+                str(output_mp3),
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
+
+        mp3_size = output_mp3.stat().st_size
 
         print(
-            f"PROCESS OK job={job_id} output={output_path.name} size={file_size}",
+            f"PROCESS OK job={job_id} wav_size={output_wav.stat().st_size} mp3_size={mp3_size}",
             flush=True,
         )
 
-        def iter_file():
-            with open(output_path, "rb") as f:
-                while True:
-                    chunk = f.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    yield chunk
-
-        return StreamingResponse(
-            iter_file(),
-            media_type="audio/wav",
-            headers={
-                "Content-Disposition": f'attachment; filename="{OUTPUT_NAMES[mode]}"',
-                "Content-Length": str(file_size),
-                "Access-Control-Allow-Origin": "*",
-                "Access-Control-Expose-Headers": "Content-Disposition, Content-Length",
-            },
+        return FileResponse(
+            output_mp3,
+            media_type="audio/mpeg",
+            filename=f"{OUTPUT_NAMES[mode]}.mp3",
         )
 
     except subprocess.CalledProcessError as exc:
@@ -133,7 +135,7 @@ async def process_endpoint(file: UploadFile = File(...), mode: str = Form("final
 
         return JSONResponse(
             status_code=500,
-            content={"detail": "FFmpeg could not read this audio file."},
+            content={"detail": "FFmpeg could not process this audio file."},
         )
 
     except Exception as exc:
@@ -147,7 +149,7 @@ async def process_endpoint(file: UploadFile = File(...), mode: str = Form("final
         )
 
     finally:
-        for path in (source_path, wav_path):
+        for path in (source_path, wav_path, output_wav):
             try:
                 if path.exists():
                     path.unlink()
