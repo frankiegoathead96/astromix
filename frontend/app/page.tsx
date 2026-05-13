@@ -102,10 +102,10 @@ export default function Home() {
       body.append("file", file);
       body.append("mode", mode);
 
-      const response = await fetch("/api/process", {
-        method: "POST",
-        body,
-      });
+      const response = await fetch("https://astromix-audio-api-689440192272.us-central1.run.app/process", {
+  method: "POST",
+  body,
+});
 
       if (!response.ok) {
         const data = await response.json().catch(() => null);
