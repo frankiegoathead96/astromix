@@ -6,9 +6,9 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from scipy.signal import butter, sosfilt, sosfiltfilt
 
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -17,12 +17,11 @@ PROCESSED_DIR = BASE_DIR / "processed"
 TMP_DIR.mkdir(exist_ok=True)
 PROCESSED_DIR.mkdir(exist_ok=True)
 
-app = FastAPI(title="Astroman Audio Engine", version="1.1.2")
+app = FastAPI(title="Astroman Audio Engine", version="1.2.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:3000"],
-    allow_origin_regex=r"https://.*\.vercel\.app",
+    allow_origins=["*"],
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -38,6 +37,19 @@ OUTPUT_NAMES = {
 }
 
 
+@app.options("/process")
+async def process_options(request: Request):
+    return Response(
+        status_code=200,
+        headers={
+            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Methods": "POST, OPTIONS",
+            "Access-Control-Allow-Headers": "*",
+            "Access-Control-Max-Age": "86400",
+        },
+    )
+
+
 @app.get("/")
 def root():
     return {"status": "ok", "message": "Astroman Audio Engine is running."}
@@ -45,7 +57,7 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "engine": "astroman-audio", "version": "1.1.2"}
+    return {"status": "ok", "engine": "astroman-audio", "version": "1.2.0"}
 
 
 @app.post("/process")
