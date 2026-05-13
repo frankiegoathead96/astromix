@@ -6,7 +6,7 @@ from pathlib import Path
 
 import numpy as np
 import soundfile as sf
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from scipy.signal import butter, sosfilt, sosfiltfilt
@@ -17,17 +17,12 @@ PROCESSED_DIR = BASE_DIR / "processed"
 TMP_DIR.mkdir(exist_ok=True)
 PROCESSED_DIR.mkdir(exist_ok=True)
 
-app = FastAPI(title="Astroman Audio Engine", version="1.1.1")
-
-ALLOWED_ORIGINS = [
-    "https://astromix-one.vercel.app",
-    "https://astromix-4rnj8ghae-frankmusicsfc-7918s-projects.vercel.app",
-    "http://localhost:3000",
-]
+app = FastAPI(title="Astroman Audio Engine", version="1.1.2")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=ALLOWED_ORIGINS,
+    allow_origins=["http://localhost:3000"],
+    allow_origin_regex=r"https://.*\.vercel\.app",
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -42,13 +37,6 @@ OUTPUT_NAMES = {
     "final_master": "astroman-final-master.wav",
 }
 
-CORS_HEADERS = {
-    "Access-Control-Allow-Origin": "https://astromix-one.vercel.app",
-    "Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-    "Access-Control-Allow-Headers": "*",
-    "Access-Control-Expose-Headers": "Content-Disposition",
-}
-
 
 @app.get("/")
 def root():
@@ -57,7 +45,7 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "engine": "astroman-audio", "version": "1.1.1"}
+    return {"status": "ok", "engine": "astroman-audio", "version": "1.1.2"}
 
 
 @app.post("/process")
@@ -66,7 +54,6 @@ async def process_endpoint(file: UploadFile = File(...), mode: str = Form("final
         return JSONResponse(
             status_code=400,
             content={"detail": "Invalid mode."},
-            headers=CORS_HEADERS,
         )
 
     job_id = uuid.uuid4().hex
@@ -78,9 +65,13 @@ async def process_endpoint(file: UploadFile = File(...), mode: str = Form("final
         with source_path.open("wb") as buffer:
             shutil.copyfileobj(file.file, buffer)
 
-        print(f"PROCESS START job={job_id} mode={mode} file={file.filename} size={source_path.stat().st_size}", flush=True)
+        print(
+            f"PROCESS START job={job_id} mode={mode} file={file.filename} size={source_path.stat().st_size}",
+            flush=True,
+        )
 
         convert_to_wav(source_path, wav_path)
+
         audio, sr = sf.read(wav_path, always_2d=True)
         audio = sanitize_audio(audio)
 
@@ -94,35 +85,38 @@ async def process_endpoint(file: UploadFile = File(...), mode: str = Form("final
             processed = final_master(audio, sr)
 
         processed = final_safety(processed, target_peak=0.92)
+
         sf.write(output_path, processed, sr, subtype="PCM_24")
 
-        print(f"PROCESS OK job={job_id} output={output_path.name} size={output_path.stat().st_size}", flush=True)
+        print(
+            f"PROCESS OK job={job_id} output={output_path.name} size={output_path.stat().st_size}",
+            flush=True,
+        )
 
         return FileResponse(
             output_path,
             media_type="audio/wav",
             filename=OUTPUT_NAMES[mode],
-            headers=CORS_HEADERS,
         )
 
     except subprocess.CalledProcessError as exc:
         print("FFMPEG ERROR", flush=True)
         print(exc, flush=True)
         print(traceback.format_exc(), flush=True)
+
         return JSONResponse(
             status_code=500,
             content={"detail": "FFmpeg could not read this audio file."},
-            headers=CORS_HEADERS,
         )
 
     except Exception as exc:
         print("PROCESSING ERROR", flush=True)
         print(str(exc), flush=True)
         print(traceback.format_exc(), flush=True)
+
         return JSONResponse(
             status_code=500,
             content={"detail": f"Processing error: {str(exc)}"},
-            headers=CORS_HEADERS,
         )
 
     finally:
@@ -135,7 +129,9 @@ async def process_endpoint(file: UploadFile = File(...), mode: str = Form("final
 
 
 def safe_name(name: str) -> str:
-    clean = "".join(char for char in name if char.isalnum() or char in {".", "_", "-", " "}).strip()
+    clean = "".join(
+        char for char in name if char.isalnum() or char in {".", "_", "-", " "}
+    ).strip()
     return clean[:120] or "upload"
 
 
@@ -151,15 +147,29 @@ def convert_to_wav(input_path: Path, output_path: Path) -> None:
         "48000",
         str(output_path),
     ]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE)
+
+    subprocess.run(
+        cmd,
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
 
 
 def sanitize_audio(audio: np.ndarray) -> np.ndarray:
-    audio = np.nan_to_num(audio.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    audio = np.nan_to_num(
+        audio.astype(np.float32),
+        nan=0.0,
+        posinf=0.0,
+        neginf=0.0,
+    )
+
     if audio.shape[1] == 1:
         audio = np.repeat(audio, 2, axis=1)
+
     if audio.shape[1] > 2:
         audio = audio[:, :2]
+
     return np.clip(audio, -1.0, 1.0)
 
 
@@ -180,7 +190,13 @@ def low_shelf_like(audio: np.ndarray, sr: int, cutoff: float, amount: float) -> 
     return (audio + low * amount).astype(np.float32)
 
 
-def band_adjust(audio: np.ndarray, sr: int, low_freq: float, high_freq: float, amount: float) -> np.ndarray:
+def band_adjust(
+    audio: np.ndarray,
+    sr: int,
+    low_freq: float,
+    high_freq: float,
+    amount: float,
+) -> np.ndarray:
     sos = butter(2, [low_freq, high_freq], btype="bandpass", fs=sr, output="sos")
     band = sosfiltfilt(sos, audio, axis=0)
     return (audio + band * amount).astype(np.float32)
@@ -210,8 +226,10 @@ def compressor_safe(
 ) -> np.ndarray:
     mono = np.mean(audio, axis=1)
     env = np.abs(mono) + 1e-9
+
     attack = np.exp(-1.0 / max(sr * attack_ms / 1000.0, 1.0))
     release = np.exp(-1.0 / max(sr * release_ms / 1000.0, 1.0))
+
     smoothed = np.empty_like(env)
     previous = env[0]
 
@@ -223,15 +241,18 @@ def compressor_safe(
     level_db = 20.0 * np.log10(smoothed + 1e-9)
     over_db = np.maximum(level_db - threshold_db, 0.0)
     gain_db = -over_db * (1.0 - 1.0 / ratio) + makeup_db
+
     return (audio * db_to_amp(gain_db)[:, None]).astype(np.float32)
 
 
 def de_ess(audio: np.ndarray, sr: int, amount: float = 0.22) -> np.ndarray:
     sos = butter(2, [5200, 10500], btype="bandpass", fs=sr, output="sos")
     ess = sosfilt(sos, audio, axis=0)
+
     ess_level = np.abs(np.mean(ess, axis=1))
     trigger = np.clip((ess_level - 0.018) / 0.09, 0.0, 1.0)
     reduction = 1.0 - trigger[:, None] * amount
+
     return (audio - ess * (1.0 - reduction)).astype(np.float32)
 
 
@@ -243,37 +264,54 @@ def saturate(audio: np.ndarray, drive: float = 1.25, mix: float = 0.18) -> np.nd
 def delay_samples(audio: np.ndarray, sr: int, delay_ms: float, gain: float) -> np.ndarray:
     samples = int(sr * delay_ms / 1000.0)
     delayed = np.zeros_like(audio)
+
     if 0 < samples < len(audio):
         delayed[samples:] = audio[:-samples] * gain
+
     return delayed
 
 
 def vocal_fx(audio: np.ndarray, sr: int) -> np.ndarray:
     slap_l = delay_samples(audio, sr, 58, 0.16)
     slap_r = delay_samples(audio[:, ::-1], sr, 116, 0.12)
+
     main_l = delay_samples(audio, sr, 285, 0.10)
     main_r = delay_samples(audio[:, ::-1], sr, 355, 0.09)
+
     reverb = np.zeros_like(audio)
-    for delay_ms, gain in [(42, 0.10), (87, 0.08), (131, 0.065), (181, 0.052), (239, 0.038)]:
+
+    for delay_ms, gain in [
+        (42, 0.10),
+        (87, 0.08),
+        (131, 0.065),
+        (181, 0.052),
+        (239, 0.038),
+    ]:
         reverb += delay_samples(audio[:, ::-1], sr, delay_ms, gain)
+
     fx = slap_l + slap_r + main_l + main_r + reverb
     fx = highpass(fx, sr, 250, order=2)
     fx = high_shelf_like(fx, sr, 7200, 0.18)
+
     return (audio + fx).astype(np.float32)
 
 
 def stereo_width(audio: np.ndarray, width: float) -> np.ndarray:
     left = audio[:, 0]
     right = audio[:, 1]
+
     mid = (left + right) * 0.5
     side = (left - right) * 0.5 * width
+
     widened = np.stack([mid + side, mid - side], axis=1)
+
     return widened.astype(np.float32)
 
 
 def ott_style(audio: np.ndarray, sr: int, depth: float) -> np.ndarray:
     low_sos = butter(2, 180, btype="lowpass", fs=sr, output="sos")
     high_sos = butter(2, 5200, btype="highpass", fs=sr, output="sos")
+
     low = sosfiltfilt(low_sos, audio, axis=0)
     high = sosfiltfilt(high_sos, audio, axis=0)
     mid = audio - low - high
@@ -281,7 +319,9 @@ def ott_style(audio: np.ndarray, sr: int, depth: float) -> np.ndarray:
     low_c = compressor_safe(low, sr, -20, 2.2, 18, 120, 0.5)
     mid_c = compressor_safe(mid, sr, -24, 2.6, 10, 95, 1.2)
     high_c = compressor_safe(high, sr, -28, 2.0, 3, 80, 2.4)
+
     wet = low_c + mid_c + high_c
+
     return (audio * (1.0 - depth) + wet * depth).astype(np.float32)
 
 
@@ -292,8 +332,10 @@ def limiter(audio: np.ndarray, ceiling: float = 0.92) -> np.ndarray:
 def final_safety(audio: np.ndarray, target_peak: float = 0.92) -> np.ndarray:
     audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
     peak = float(np.max(np.abs(audio)) + 1e-9)
+
     if peak > target_peak:
         audio = audio * (target_peak / peak)
+
     return np.clip(audio, -0.99, 0.99).astype(np.float32)
 
 
@@ -301,7 +343,15 @@ def vocal_polish(audio: np.ndarray, sr: int) -> np.ndarray:
     x = normalize_rms(audio, -22.0)
     x = highpass(x, sr, 115, order=4)
     x = high_shelf_like(x, sr, 9000, 0.18)
-    x = compressor_safe(x, sr, threshold_db=-25.0, ratio=4.0, attack_ms=4.5, release_ms=45.0, makeup_db=7.0)
+    x = compressor_safe(
+        x,
+        sr,
+        threshold_db=-25.0,
+        ratio=4.0,
+        attack_ms=4.5,
+        release_ms=45.0,
+        makeup_db=7.0,
+    )
     x = highpass(x, sr, 132.6, order=3)
     x = de_ess(x, sr, 0.2)
     x = saturate(x, drive=1.35, mix=0.16)
@@ -312,6 +362,7 @@ def vocal_polish(audio: np.ndarray, sr: int) -> np.ndarray:
     x = stereo_width(x, width=1.08)
     x = normalize_rms(x, -13.5)
     x = limiter(x, ceiling=0.9)
+
     return x
 
 
@@ -324,8 +375,17 @@ def instrumental_polish(audio: np.ndarray, sr: int) -> np.ndarray:
     x = saturate(x, drive=1.12, mix=0.08)
     x = ott_style(x, sr, depth=0.18)
     x = stereo_width(x, width=1.08)
-    x = compressor_safe(x, sr, threshold_db=-13.5, ratio=1.7, attack_ms=18, release_ms=140, makeup_db=0.4)
+    x = compressor_safe(
+        x,
+        sr,
+        threshold_db=-13.5,
+        ratio=1.7,
+        attack_ms=18,
+        release_ms=140,
+        makeup_db=0.4,
+    )
     x = limiter(x, ceiling=0.92)
+
     return x
 
 
@@ -336,8 +396,17 @@ def full_mix_polish(audio: np.ndarray, sr: int) -> np.ndarray:
     x = saturate(x, drive=1.15, mix=0.10)
     x = ott_style(x, sr, depth=0.16)
     x = stereo_width(x, width=1.05)
-    x = compressor_safe(x, sr, threshold_db=-14.5, ratio=1.8, attack_ms=20, release_ms=130, makeup_db=0.8)
+    x = compressor_safe(
+        x,
+        sr,
+        threshold_db=-14.5,
+        ratio=1.8,
+        attack_ms=20,
+        release_ms=130,
+        makeup_db=0.8,
+    )
     x = limiter(x, ceiling=0.92)
+
     return x
 
 
@@ -350,13 +419,23 @@ def final_master(audio: np.ndarray, sr: int) -> np.ndarray:
     x = saturate(x, drive=1.18, mix=0.11)
     x = ott_style(x, sr, depth=0.20)
     x = stereo_width(x, width=1.07)
-    x = compressor_safe(x, sr, threshold_db=-15.0, ratio=1.9, attack_ms=22, release_ms=125, makeup_db=0.9)
+    x = compressor_safe(
+        x,
+        sr,
+        threshold_db=-15.0,
+        ratio=1.9,
+        attack_ms=22,
+        release_ms=125,
+        makeup_db=0.9,
+    )
 
     current = rms_db(x)
+
     if current < -10.5:
         x = normalize_rms(x, -10.5)
     elif current > -8.0:
         x = normalize_rms(x, -8.8)
 
     x = limiter(x, ceiling=0.91)
+
     return x
