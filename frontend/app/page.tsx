@@ -17,7 +17,7 @@ const modes: { id: Mode; label: string; desc: string; output: string }[] = [
   {
     id: "final_master",
     label: "Final Master",
-    desc: "The finished master. Loud, clean, controlled, ready to send.",
+    desc: "The finished WAV. Loud, clean, controlled, ready to send.",
     output: "astroman-final-master.mp3",
   },
   {
@@ -75,10 +75,10 @@ function Metric({ label, value }: { label: string; value: string }) {
 export default function Home() {
   const [file, setFile] = useState<File | null>(null);
   const [mode, setMode] = useState<Mode>("final_master");
+  const [bpm, setBpm] = useState("120");
   const [isProcessing, setIsProcessing] = useState(false);
   const [error, setError] = useState("");
   const [processedUrl, setProcessedUrl] = useState("");
-  const [debugInfo, setDebugInfo] = useState("");
 
   const inputRef = useRef<HTMLInputElement | null>(null);
   const activeMode = modes.find((item) => item.id === mode) || modes[0];
@@ -95,22 +95,21 @@ export default function Home() {
     }
 
     setError("");
-    setDebugInfo("");
     setProcessedUrl("");
     setIsProcessing(true);
 
     try {
-      setDebugInfo("Uploading and processing...");
       const body = new FormData();
       body.append("file", file);
       body.append("mode", mode);
+      if (mode === "vocal") {
+        body.append("bpm", bpm || "120");
+      }
 
       const response = await fetch("/api/backend/process", {
         method: "POST",
         body,
       });
-
-      setDebugInfo(`Response: status=${response.status}, type=${response.headers.get("content-type")}, size=${response.headers.get("content-length") || "streaming"}`);
 
       if (!response.ok) {
         let detail = `HTTP ${response.status}`;
@@ -120,7 +119,7 @@ export default function Home() {
         } catch {
           try {
             const text = await response.text();
-            detail = text.slice(0, 300) || detail;
+            detail = text.slice(0, 200) || detail;
           } catch {
             // ignore
           }
@@ -128,9 +127,7 @@ export default function Home() {
         throw new Error(detail);
       }
 
-      setDebugInfo((prev) => prev + "\nReading audio data...");
       const blob = await response.blob();
-      setDebugInfo((prev) => prev + `\nReceived ${(blob.size / 1024 / 1024).toFixed(1)} MB`);
 
       if (blob.size < 1000) {
         const text = await blob.text();
@@ -138,11 +135,18 @@ export default function Home() {
       }
 
       setProcessedUrl(URL.createObjectURL(blob));
-      setDebugInfo((prev) => prev + "\nDone!");
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Unknown error";
-      setError(msg);
-      setDebugInfo((prev) => prev + `\nError: ${msg}`);
+
+      if (msg.includes("Failed to fetch") || msg.includes("NetworkError")) {
+        setError("Network error — couldn't reach the server. Try again in a moment.");
+      } else if (msg.includes("413")) {
+        setError("File is too large. Try a shorter clip or a compressed format.");
+      } else if (msg.includes("504") || msg.includes("Timeout")) {
+        setError("Processing timed out. Try a shorter file.");
+      } else {
+        setError(msg);
+      }
     } finally {
       setIsProcessing(false);
     }
@@ -162,7 +166,7 @@ export default function Home() {
             </div>
           </div>
           <div className="hidden rounded-full border border-white/10 px-4 py-2 text-sm text-white/60 sm:block">
-            v1.4.0
+            v1.5.0
           </div>
         </header>
 
@@ -210,7 +214,6 @@ export default function Home() {
                 setFile(event.target.files?.[0] || null);
                 setProcessedUrl("");
                 setError("");
-                setDebugInfo("");
               }}
             />
 
@@ -245,6 +248,25 @@ export default function Home() {
               </div>
             </div>
 
+            {mode === "vocal" && (
+              <div className="mt-5 rounded-2xl border border-white/10 bg-white/[0.035] px-5 py-4">
+                <label className="flex items-center justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-bold text-white/80">BPM</p>
+                    <p className="mt-0.5 text-xs text-white/40">Sets delay timing for the vocal FX</p>
+                  </div>
+                  <input
+                    type="number"
+                    min="40"
+                    max="300"
+                    value={bpm}
+                    onChange={(e) => setBpm(e.target.value)}
+                    className="w-20 rounded-xl border border-white/15 bg-black/40 px-3 py-2 text-center text-lg font-bold text-white outline-none focus:border-white/40"
+                  />
+                </label>
+              </div>
+            )}
+
             {file && originalUrl && (
               <div className="mt-6 rounded-3xl border border-white/10 bg-black/25 p-4">
                 <p className="mb-3 text-sm font-semibold text-white/60">Original Preview</p>
@@ -253,14 +275,8 @@ export default function Home() {
             )}
 
             {error && (
-              <div className="mt-5 rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-white whitespace-pre-wrap">
+              <div className="mt-5 rounded-2xl border border-red-500/30 bg-red-500/10 p-4 text-sm text-white">
                 {error}
-              </div>
-            )}
-
-            {debugInfo && (
-              <div className="mt-3 rounded-2xl border border-yellow-500/30 bg-yellow-500/10 p-4 text-xs text-yellow-200 whitespace-pre-wrap font-mono">
-                {debugInfo}
               </div>
             )}
 
