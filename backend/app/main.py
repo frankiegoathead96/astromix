@@ -17,7 +17,7 @@ PROCESSED_DIR = BASE_DIR / "processed"
 TMP_DIR.mkdir(exist_ok=True)
 PROCESSED_DIR.mkdir(exist_ok=True)
 
-app = FastAPI(title="Astroman Audio Engine", version="1.5.0")
+app = FastAPI(title="Astroman Audio Engine", version="1.6.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,7 +57,7 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "engine": "astroman-audio", "version": "1.5.0"}
+    return {"status": "ok", "engine": "astroman-audio", "version": "1.6.0"}
 
 
 @app.post("/process")
@@ -188,6 +188,11 @@ def highpass(audio: np.ndarray, sr: int, freq: float, order: int = 3) -> np.ndar
     return sosfiltfilt(sos, audio, axis=0).astype(np.float32)
 
 
+def lowpass(audio: np.ndarray, sr: int, freq: float, order: int = 2) -> np.ndarray:
+    sos = butter(order, freq, btype="lowpass", fs=sr, output="sos")
+    return sosfiltfilt(sos, audio, axis=0).astype(np.float32)
+
+
 def high_shelf_like(audio: np.ndarray, sr: int, cutoff: float, amount: float) -> np.ndarray:
     sos = butter(2, cutoff, btype="highpass", fs=sr, output="sos")
     high = sosfiltfilt(sos, audio, axis=0)
@@ -204,6 +209,12 @@ def band_adjust(audio: np.ndarray, sr: int, low_freq: float, high_freq: float, a
     sos = butter(2, [low_freq, high_freq], btype="bandpass", fs=sr, output="sos")
     band = sosfiltfilt(sos, audio, axis=0)
     return (audio + band * amount).astype(np.float32)
+
+
+def band_cut(audio: np.ndarray, sr: int, low_freq: float, high_freq: float, amount: float) -> np.ndarray:
+    sos = butter(2, [low_freq, high_freq], btype="bandpass", fs=sr, output="sos")
+    band = sosfiltfilt(sos, audio, axis=0)
+    return (audio - band * amount).astype(np.float32)
 
 
 def db_to_amp(db):
@@ -263,21 +274,45 @@ def saturate(audio: np.ndarray, drive: float = 1.25, mix: float = 0.18) -> np.nd
     return (audio * (1.0 - mix) + wet * mix).astype(np.float32)
 
 
-def delay_samples(audio: np.ndarray, sr: int, delay_ms: float, gain: float) -> np.ndarray:
+def delay_mono(audio: np.ndarray, sr: int, delay_ms: float, gain: float, feedback: float = 0.0) -> np.ndarray:
+    """Mono delay with feedback. Returns signal as stereo (duplicated L/R)."""
+    mono = np.mean(audio, axis=1)
     samples = int(sr * delay_ms / 1000.0)
-    delayed = np.zeros_like(audio)
-    if 0 < samples < len(audio):
-        delayed[samples:] = audio[:-samples] * gain
-    return delayed
+    out = np.zeros_like(mono)
+    if samples > 0 and samples < len(mono):
+        out[samples:] = mono[:-samples] * gain
+        if feedback > 0:
+            fb_gain = gain
+            offset = samples
+            for _ in range(8):
+                fb_gain *= feedback
+                offset += samples
+                if offset >= len(mono) or fb_gain < 0.001:
+                    break
+                out[offset:] += mono[:-offset] * fb_gain
+    return np.column_stack([out, out]).astype(np.float32)
 
 
-def delay_stereo(audio: np.ndarray, sr: int, delay_ms_l: float, delay_ms_r: float, gain: float) -> np.ndarray:
-    """Stereo delay with independent L/R times for width."""
-    left = audio[:, 0:1]
-    right = audio[:, 1:2]
-    dl = delay_samples(np.column_stack([left, left]), sr, delay_ms_l, gain)[:, 0:1]
-    dr = delay_samples(np.column_stack([right, right]), sr, delay_ms_r, gain)[:, 0:1]
-    return np.column_stack([dl, dr]).astype(np.float32)
+def reverb_wide(audio: np.ndarray, sr: int, taps, pre_delay_ms: float = 0, hpf: float = 200, lpf: float = 8000, gain: float = 1.0) -> np.ndarray:
+    """Wide stereo reverb with independent L/R tap times."""
+    mono = np.mean(audio, axis=1)
+    n = len(mono)
+    out_l = np.zeros(n, dtype=np.float32)
+    out_r = np.zeros(n, dtype=np.float32)
+    pre = int(sr * pre_delay_ms / 1000.0)
+    
+    for ms_l, ms_r, g in taps:
+        sl = pre + int(sr * ms_l / 1000.0)
+        sr_idx = pre + int(sr * ms_r / 1000.0)
+        if 0 < sl < n:
+            out_l[sl:] += mono[:-sl] * g
+        if 0 < sr_idx < n:
+            out_r[sr_idx:] += mono[:-sr_idx] * g
+    
+    result = np.column_stack([out_l, out_r]).astype(np.float32)
+    result = highpass(result, sr, hpf, order=2)
+    result = lowpass(result, sr, lpf, order=2)
+    return (result * gain).astype(np.float32)
 
 
 def stereo_width(audio: np.ndarray, width: float) -> np.ndarray:
@@ -300,98 +335,74 @@ def final_safety(audio: np.ndarray, target_peak: float = 0.95) -> np.ndarray:
     return np.clip(audio, -0.99, 0.99).astype(np.float32)
 
 
-# ─── FX: BPM-SYNCED DELAYS + DUAL REVERB ─────────────────────────────────────
-
-
-def vocal_fx(audio: np.ndarray, sr: int, bpm: float = 120.0) -> np.ndarray:
-    """
-    Two BPM-synced delays (1/4 and 1/2) + two reverbs (room + hall).
-    All at -20dB aux level, matching the Pro Tools routing.
-    Delays have high-pass EQ on returns.
-    """
-    quarter_ms = 60000.0 / bpm
-    half_ms = quarter_ms * 2.0
-    aux_gain = 0.1  # -20dB
-
-    # 1/4 note delay — stereo with slight L/R offset for width
-    d_quarter = delay_stereo(audio, sr, quarter_ms, quarter_ms + 15, aux_gain)
-    d_quarter = highpass(d_quarter, sr, 200, order=2)
-
-    # 1/2 note delay — stereo with L/R offset
-    d_half = delay_stereo(audio, sr, half_ms, half_ms + 25, aux_gain * 0.85)
-    d_half = highpass(d_half, sr, 200, order=2)
-
-    # Reverb 1: Room (AIR Reverb style — early reflections, short)
-    rev1 = np.zeros_like(audio)
-    for ms_l, ms_r, g in [
-        (12, 17, 0.04),
-        (29, 38, 0.035),
-        (43, 55, 0.03),
-        (67, 79, 0.025),
-        (89, 103, 0.02),
-    ]:
-        rev1 += delay_stereo(audio, sr, ms_l, ms_r, g)
-    rev1 = highpass(rev1, sr, 300, order=2)
-    rev1 = rev1 * aux_gain * 2.5
-
-    # Reverb 2: Hall (ReVibe style — longer, wider, 24ms pre-delay)
-    rev2 = np.zeros_like(audio)
-    pre = 24
-    for ms_l, ms_r, g in [
-        (pre + 54, pre + 67, 0.028),
-        (pre + 110, pre + 130, 0.024),
-        (pre + 174, pre + 198, 0.019),
-        (pre + 243, pre + 275, 0.015),
-        (pre + 321, pre + 360, 0.011),
-        (pre + 406, pre + 450, 0.008),
-    ]:
-        rev2 += delay_stereo(audio, sr, ms_l, ms_r, g)
-    rev2 = highpass(rev2, sr, 250, order=2)
-    rev2 = rev2 * aux_gain * 2.5
-
-    return (audio + d_quarter + d_half + rev1 + rev2).astype(np.float32)
-
-
 # ─── VOCAL POLISH ─────────────────────────────────────────────────────────────
-# Chain: ChannelStrip EQ → CLA-76 compression → EQ3 HPF → de-ess → post-EQ → FX
+# Dry chain: ChannelStrip EQ → CLA-76 compression → EQ3 HPF → de-ess → post-EQ
+# FX: 1/8 delay (mono, filtered, with feedback) + 1/4, 1/2 delays + wide reverbs
 
 
 def vocal_polish(audio: np.ndarray, sr: int, bpm: float = 120.0) -> np.ndarray:
     x = audio.copy()
 
-    # Insert A: MH ChannelStrip EQ
-    # +3.26dB air shelf at 10.6kHz
+    # ChannelStrip: air boost + low cut
     x = high_shelf_like(x, sr, 10600, 0.45)
-    # -0.96dB low shelf at 117Hz
     x = low_shelf_like(x, sr, 117, -0.10)
 
-    # Insert B: CLA-76 (In Your Face, BLUEY, 4:1)
-    # Fast attack, fast release, aggressive peak control
-    x = compressor(x, sr,
-        threshold_db=-24.0,
-        ratio=3.5,
-        attack_ms=2.0,
-        release_ms=35.0,
-        makeup_db=12.0,
-    )
-    # CLA-76 BLUEY harmonic saturation
+    # CLA-76: aggressive compression with saturation
+    x = compressor(x, sr, threshold_db=-24.0, ratio=3.5, attack_ms=2.0, release_ms=35.0, makeup_db=12.0)
     x = saturate(x, drive=1.4, mix=0.15)
 
-    # Insert C: EQ3 high-pass at 132.6Hz, 18dB/oct
+    # EQ3 HPF + de-ess
     x = highpass(x, sr, 132.6, order=3)
-
-    # De-ess (sibilance gets louder after compression)
     x = de_ess(x, sr, 0.18)
 
-    # Post shaping: presence lift
+    # Post-EQ: presence + low-mid shape
     x = high_shelf_like(x, sr, 7500, 0.14)
     x = band_adjust(x, sr, 200, 500, -0.04)
 
-    # FX: BPM-synced delays + dual reverb at -20dB
-    x = vocal_fx(x, sr, bpm)
+    # ─── FX: BPM-synced delays + wide reverbs ───
+    eighth_ms = 60000.0 / bpm / 2       # 250ms at 120 BPM
+    quarter_ms = 60000.0 / bpm           # 500ms
+    half_ms = quarter_ms * 2              # 1000ms
+
+    # 1/8 delay: PRIMARY delay with feedback (creates 1/4 and 1/2 echoes naturally)
+    # Mono, with HPF 177Hz + notch at 2.47kHz + LPF 4kHz
+    d_eighth = delay_mono(x, sr, eighth_ms, gain=0.10, feedback=0.4)
+    d_eighth = highpass(d_eighth, sr, 177, order=3)
+    d_eighth = band_cut(d_eighth, sr, 2000, 3000, 0.6)
+    d_eighth = lowpass(d_eighth, sr, 4000, order=2)
+
+    # 1/4 delay: secondary, quiet
+    d_quarter = delay_mono(x, sr, quarter_ms, gain=0.02)
+    d_quarter = highpass(d_quarter, sr, 177, order=3)
+    d_quarter = band_cut(d_quarter, sr, 2000, 3000, 0.6)
+    d_quarter = lowpass(d_quarter, sr, 4000, order=2)
+
+    # 1/2 delay: very subtle
+    d_half = delay_mono(x, sr, half_ms, gain=0.008)
+    d_half = highpass(d_half, sr, 177, order=3)
+    d_half = band_cut(d_half, sr, 2000, 3000, 0.6)
+    d_half = lowpass(d_half, sr, 4000, order=2)
+
+    # Room reverb: short, bright, wide stereo spread
+    r1 = reverb_wide(x, sr, [
+        (5, 22, 0.05), (12, 38, 0.045), (24, 55, 0.040),
+        (40, 78, 0.034), (60, 108, 0.028), (88, 145, 0.022),
+        (122, 190, 0.016), (168, 248, 0.011), (225, 318, 0.007)
+    ], pre_delay_ms=0, hpf=180, lpf=8000, gain=0.40)
+
+    # Hall reverb: longer, wider, with pre-delay
+    r2 = reverb_wide(x, sr, [
+        (35, 90, 0.038), (80, 165, 0.032), (140, 260, 0.026),
+        (215, 370, 0.020), (305, 490, 0.015), (410, 630, 0.010),
+        (540, 790, 0.007), (700, 980, 0.004)
+    ], pre_delay_ms=24, hpf=180, lpf=6500, gain=0.40)
+
+    # Combine FX
+    fx = d_eighth + d_quarter + d_half + r1 + r2
+    x = x + fx
 
     # Subtle stereo width
-    x = stereo_width(x, 1.06)
+    x = stereo_width(x, 1.02)
 
     return x
 
@@ -407,13 +418,7 @@ def instrumental_polish(audio: np.ndarray, sr: int) -> np.ndarray:
     x = high_shelf_like(x, sr, 6500, 0.055)
     x = saturate(x, drive=1.12, mix=0.08)
     x = stereo_width(x, 1.08)
-    x = compressor(x, sr,
-        threshold_db=-13.5,
-        ratio=1.7,
-        attack_ms=18,
-        release_ms=140,
-        makeup_db=0.4,
-    )
+    x = compressor(x, sr, threshold_db=-13.5, ratio=1.7, attack_ms=18, release_ms=140, makeup_db=0.4)
     x = limiter(x, ceiling=0.92)
     return x
 
@@ -427,13 +432,7 @@ def full_mix_polish(audio: np.ndarray, sr: int) -> np.ndarray:
     x = high_shelf_like(x, sr, 7000, 0.07)
     x = saturate(x, drive=1.15, mix=0.10)
     x = stereo_width(x, 1.05)
-    x = compressor(x, sr,
-        threshold_db=-14.5,
-        ratio=1.8,
-        attack_ms=20,
-        release_ms=130,
-        makeup_db=0.8,
-    )
+    x = compressor(x, sr, threshold_db=-14.5, ratio=1.8, attack_ms=20, release_ms=130, makeup_db=0.8)
     x = limiter(x, ceiling=0.92)
     return x
 
@@ -449,13 +448,7 @@ def final_master(audio: np.ndarray, sr: int) -> np.ndarray:
     x = high_shelf_like(x, sr, 7200, 0.075)
     x = saturate(x, drive=1.18, mix=0.11)
     x = stereo_width(x, 1.07)
-    x = compressor(x, sr,
-        threshold_db=-15.0,
-        ratio=1.9,
-        attack_ms=22,
-        release_ms=125,
-        makeup_db=0.9,
-    )
+    x = compressor(x, sr, threshold_db=-15.0, ratio=1.9, attack_ms=22, release_ms=125, makeup_db=0.9)
 
     current = rms_db(x)
     if current < -10.5:
