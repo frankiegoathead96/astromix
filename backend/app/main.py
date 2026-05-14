@@ -17,7 +17,7 @@ PROCESSED_DIR = BASE_DIR / "processed"
 TMP_DIR.mkdir(exist_ok=True)
 PROCESSED_DIR.mkdir(exist_ok=True)
 
-app = FastAPI(title="Astroman Audio Engine", version="1.4.0")
+app = FastAPI(title="Astroman Audio Engine", version="1.5.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -57,16 +57,20 @@ def root():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "engine": "astroman-audio", "version": "1.4.0"}
+    return {"status": "ok", "engine": "astroman-audio", "version": "1.5.0"}
 
 
 @app.post("/process")
-async def process_endpoint(file: UploadFile = File(...), mode: str = Form("final_master")):
+async def process_endpoint(
+    file: UploadFile = File(...),
+    mode: str = Form("final_master"),
+    bpm: float = Form(120.0),
+):
     if mode not in VALID_MODES:
-        return JSONResponse(
-            status_code=400,
-            content={"detail": "Invalid mode."},
-        )
+        return JSONResponse(status_code=400, content={"detail": "Invalid mode."})
+
+    if bpm < 40 or bpm > 300:
+        bpm = 120.0
 
     job_id = uuid.uuid4().hex
     source_path = TMP_DIR / f"{job_id}_{safe_name(file.filename or 'upload')}"
@@ -79,7 +83,7 @@ async def process_endpoint(file: UploadFile = File(...), mode: str = Form("final
             shutil.copyfileobj(file.file, buffer)
 
         print(
-            f"PROCESS START job={job_id} mode={mode} file={file.filename} size={source_path.stat().st_size}",
+            f"PROCESS START job={job_id} mode={mode} bpm={bpm} file={file.filename} size={source_path.stat().st_size}",
             flush=True,
         )
 
@@ -89,7 +93,7 @@ async def process_endpoint(file: UploadFile = File(...), mode: str = Form("final
         audio = sanitize_audio(audio)
 
         if mode == "vocal":
-            processed = vocal_polish(audio, sr)
+            processed = vocal_polish(audio, sr, bpm)
         elif mode == "instrumental":
             processed = instrumental_polish(audio, sr)
         elif mode == "mix":
@@ -97,11 +101,10 @@ async def process_endpoint(file: UploadFile = File(...), mode: str = Form("final
         else:
             processed = final_master(audio, sr)
 
-        processed = final_safety(processed, target_peak=0.92)
+        processed = final_safety(processed, target_peak=0.95)
 
         sf.write(output_wav, processed, sr, subtype="PCM_24")
 
-        # Convert WAV to MP3 320kbps for delivery (WAV is too large for Cloud Run response)
         subprocess.run(
             [
                 "ffmpeg", "-y",
@@ -132,21 +135,13 @@ async def process_endpoint(file: UploadFile = File(...), mode: str = Form("final
         print("FFMPEG ERROR", flush=True)
         print(exc, flush=True)
         print(traceback.format_exc(), flush=True)
-
-        return JSONResponse(
-            status_code=500,
-            content={"detail": "FFmpeg could not process this audio file."},
-        )
+        return JSONResponse(status_code=500, content={"detail": "FFmpeg could not process this audio file."})
 
     except Exception as exc:
         print("PROCESSING ERROR", flush=True)
         print(str(exc), flush=True)
         print(traceback.format_exc(), flush=True)
-
-        return JSONResponse(
-            status_code=500,
-            content={"detail": f"Processing error: {str(exc)}"},
-        )
+        return JSONResponse(status_code=500, content={"detail": f"Processing error: {str(exc)}"})
 
     finally:
         for path in (source_path, wav_path, output_wav):
@@ -157,6 +152,9 @@ async def process_endpoint(file: UploadFile = File(...), mode: str = Form("final
                 pass
 
 
+# ─── UTILITIES ────────────────────────────────────────────────────────────────
+
+
 def safe_name(name: str) -> str:
     clean = "".join(
         char for char in name if char.isalnum() or char in {".", "_", "-", " "}
@@ -165,20 +163,8 @@ def safe_name(name: str) -> str:
 
 
 def convert_to_wav(input_path: Path, output_path: Path) -> None:
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(input_path),
-        "-acodec",
-        "pcm_f32le",
-        "-ar",
-        "48000",
-        str(output_path),
-    ]
-
     subprocess.run(
-        cmd,
+        ["ffmpeg", "-y", "-i", str(input_path), "-acodec", "pcm_f32le", "-ar", "48000", str(output_path)],
         check=True,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
@@ -186,20 +172,15 @@ def convert_to_wav(input_path: Path, output_path: Path) -> None:
 
 
 def sanitize_audio(audio: np.ndarray) -> np.ndarray:
-    audio = np.nan_to_num(
-        audio.astype(np.float32),
-        nan=0.0,
-        posinf=0.0,
-        neginf=0.0,
-    )
-
+    audio = np.nan_to_num(audio.astype(np.float32), nan=0.0, posinf=0.0, neginf=0.0)
     if audio.shape[1] == 1:
         audio = np.repeat(audio, 2, axis=1)
-
     if audio.shape[1] > 2:
         audio = audio[:, :2]
-
     return np.clip(audio, -1.0, 1.0)
+
+
+# ─── DSP BUILDING BLOCKS ─────────────────────────────────────────────────────
 
 
 def highpass(audio: np.ndarray, sr: int, freq: float, order: int = 3) -> np.ndarray:
@@ -219,13 +200,7 @@ def low_shelf_like(audio: np.ndarray, sr: int, cutoff: float, amount: float) -> 
     return (audio + low * amount).astype(np.float32)
 
 
-def band_adjust(
-    audio: np.ndarray,
-    sr: int,
-    low_freq: float,
-    high_freq: float,
-    amount: float,
-) -> np.ndarray:
+def band_adjust(audio: np.ndarray, sr: int, low_freq: float, high_freq: float, amount: float) -> np.ndarray:
     sos = butter(2, [low_freq, high_freq], btype="bandpass", fs=sr, output="sos")
     band = sosfiltfilt(sos, audio, axis=0)
     return (audio + band * amount).astype(np.float32)
@@ -244,7 +219,7 @@ def normalize_rms(audio: np.ndarray, target_db: float) -> np.ndarray:
     return (audio * gain).astype(np.float32)
 
 
-def compressor_safe(
+def compressor(
     audio: np.ndarray,
     sr: int,
     threshold_db: float,
@@ -277,11 +252,9 @@ def compressor_safe(
 def de_ess(audio: np.ndarray, sr: int, amount: float = 0.22) -> np.ndarray:
     sos = butter(2, [5200, 10500], btype="bandpass", fs=sr, output="sos")
     ess = sosfilt(sos, audio, axis=0)
-
     ess_level = np.abs(np.mean(ess, axis=1))
     trigger = np.clip((ess_level - 0.018) / 0.09, 0.0, 1.0)
     reduction = 1.0 - trigger[:, None] * amount
-
     return (audio - ess * (1.0 - reduction)).astype(np.float32)
 
 
@@ -293,106 +266,137 @@ def saturate(audio: np.ndarray, drive: float = 1.25, mix: float = 0.18) -> np.nd
 def delay_samples(audio: np.ndarray, sr: int, delay_ms: float, gain: float) -> np.ndarray:
     samples = int(sr * delay_ms / 1000.0)
     delayed = np.zeros_like(audio)
-
     if 0 < samples < len(audio):
         delayed[samples:] = audio[:-samples] * gain
-
     return delayed
 
 
-def vocal_fx(audio: np.ndarray, sr: int) -> np.ndarray:
-    slap_l = delay_samples(audio, sr, 58, 0.16)
-    slap_r = delay_samples(audio[:, ::-1], sr, 116, 0.12)
-
-    main_l = delay_samples(audio, sr, 285, 0.10)
-    main_r = delay_samples(audio[:, ::-1], sr, 355, 0.09)
-
-    reverb = np.zeros_like(audio)
-
-    for delay_ms, gain in [
-        (42, 0.10),
-        (87, 0.08),
-        (131, 0.065),
-        (181, 0.052),
-        (239, 0.038),
-    ]:
-        reverb += delay_samples(audio[:, ::-1], sr, delay_ms, gain)
-
-    fx = slap_l + slap_r + main_l + main_r + reverb
-    fx = highpass(fx, sr, 250, order=2)
-    fx = high_shelf_like(fx, sr, 7200, 0.18)
-
-    return (audio + fx).astype(np.float32)
+def delay_stereo(audio: np.ndarray, sr: int, delay_ms_l: float, delay_ms_r: float, gain: float) -> np.ndarray:
+    """Stereo delay with independent L/R times for width."""
+    left = audio[:, 0:1]
+    right = audio[:, 1:2]
+    dl = delay_samples(np.column_stack([left, left]), sr, delay_ms_l, gain)[:, 0:1]
+    dr = delay_samples(np.column_stack([right, right]), sr, delay_ms_r, gain)[:, 0:1]
+    return np.column_stack([dl, dr]).astype(np.float32)
 
 
 def stereo_width(audio: np.ndarray, width: float) -> np.ndarray:
     left = audio[:, 0]
     right = audio[:, 1]
-
     mid = (left + right) * 0.5
     side = (left - right) * 0.5 * width
-
-    widened = np.stack([mid + side, mid - side], axis=1)
-
-    return widened.astype(np.float32)
-
-
-def ott_style(audio: np.ndarray, sr: int, depth: float) -> np.ndarray:
-    low_sos = butter(2, 180, btype="lowpass", fs=sr, output="sos")
-    high_sos = butter(2, 5200, btype="highpass", fs=sr, output="sos")
-
-    low = sosfiltfilt(low_sos, audio, axis=0)
-    high = sosfiltfilt(high_sos, audio, axis=0)
-    mid = audio - low - high
-
-    low_c = compressor_safe(low, sr, -20, 2.2, 18, 120, 0.5)
-    mid_c = compressor_safe(mid, sr, -24, 2.6, 10, 95, 1.2)
-    high_c = compressor_safe(high, sr, -28, 2.0, 3, 80, 2.4)
-
-    wet = low_c + mid_c + high_c
-
-    return (audio * (1.0 - depth) + wet * depth).astype(np.float32)
+    return np.stack([mid + side, mid - side], axis=1).astype(np.float32)
 
 
 def limiter(audio: np.ndarray, ceiling: float = 0.92) -> np.ndarray:
     return np.tanh(audio / ceiling) * ceiling
 
 
-def final_safety(audio: np.ndarray, target_peak: float = 0.92) -> np.ndarray:
+def final_safety(audio: np.ndarray, target_peak: float = 0.95) -> np.ndarray:
     audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
     peak = float(np.max(np.abs(audio)) + 1e-9)
-
     if peak > target_peak:
         audio = audio * (target_peak / peak)
-
     return np.clip(audio, -0.99, 0.99).astype(np.float32)
 
 
-def vocal_polish(audio: np.ndarray, sr: int) -> np.ndarray:
-    x = normalize_rms(audio, -22.0)
-    x = highpass(x, sr, 115, order=4)
-    x = high_shelf_like(x, sr, 9000, 0.18)
-    x = compressor_safe(
-        x,
-        sr,
-        threshold_db=-25.0,
-        ratio=4.0,
-        attack_ms=4.5,
-        release_ms=45.0,
-        makeup_db=7.0,
+# ─── FX: BPM-SYNCED DELAYS + DUAL REVERB ─────────────────────────────────────
+
+
+def vocal_fx(audio: np.ndarray, sr: int, bpm: float = 120.0) -> np.ndarray:
+    """
+    Two BPM-synced delays (1/4 and 1/2) + two reverbs (room + hall).
+    All at -20dB aux level, matching the Pro Tools routing.
+    Delays have high-pass EQ on returns.
+    """
+    quarter_ms = 60000.0 / bpm
+    half_ms = quarter_ms * 2.0
+    aux_gain = 0.1  # -20dB
+
+    # 1/4 note delay — stereo with slight L/R offset for width
+    d_quarter = delay_stereo(audio, sr, quarter_ms, quarter_ms + 15, aux_gain)
+    d_quarter = highpass(d_quarter, sr, 200, order=2)
+
+    # 1/2 note delay — stereo with L/R offset
+    d_half = delay_stereo(audio, sr, half_ms, half_ms + 25, aux_gain * 0.85)
+    d_half = highpass(d_half, sr, 200, order=2)
+
+    # Reverb 1: Room (AIR Reverb style — early reflections, short)
+    rev1 = np.zeros_like(audio)
+    for ms_l, ms_r, g in [
+        (12, 17, 0.04),
+        (29, 38, 0.035),
+        (43, 55, 0.03),
+        (67, 79, 0.025),
+        (89, 103, 0.02),
+    ]:
+        rev1 += delay_stereo(audio, sr, ms_l, ms_r, g)
+    rev1 = highpass(rev1, sr, 300, order=2)
+    rev1 = rev1 * aux_gain * 2.5
+
+    # Reverb 2: Hall (ReVibe style — longer, wider, 24ms pre-delay)
+    rev2 = np.zeros_like(audio)
+    pre = 24
+    for ms_l, ms_r, g in [
+        (pre + 54, pre + 67, 0.028),
+        (pre + 110, pre + 130, 0.024),
+        (pre + 174, pre + 198, 0.019),
+        (pre + 243, pre + 275, 0.015),
+        (pre + 321, pre + 360, 0.011),
+        (pre + 406, pre + 450, 0.008),
+    ]:
+        rev2 += delay_stereo(audio, sr, ms_l, ms_r, g)
+    rev2 = highpass(rev2, sr, 250, order=2)
+    rev2 = rev2 * aux_gain * 2.5
+
+    return (audio + d_quarter + d_half + rev1 + rev2).astype(np.float32)
+
+
+# ─── VOCAL POLISH ─────────────────────────────────────────────────────────────
+# Chain: ChannelStrip EQ → CLA-76 compression → EQ3 HPF → de-ess → post-EQ → FX
+
+
+def vocal_polish(audio: np.ndarray, sr: int, bpm: float = 120.0) -> np.ndarray:
+    x = audio.copy()
+
+    # Insert A: MH ChannelStrip EQ
+    # +3.26dB air shelf at 10.6kHz
+    x = high_shelf_like(x, sr, 10600, 0.45)
+    # -0.96dB low shelf at 117Hz
+    x = low_shelf_like(x, sr, 117, -0.10)
+
+    # Insert B: CLA-76 (In Your Face, BLUEY, 4:1)
+    # Fast attack, fast release, aggressive peak control
+    x = compressor(x, sr,
+        threshold_db=-24.0,
+        ratio=3.5,
+        attack_ms=2.0,
+        release_ms=35.0,
+        makeup_db=12.0,
     )
+    # CLA-76 BLUEY harmonic saturation
+    x = saturate(x, drive=1.4, mix=0.15)
+
+    # Insert C: EQ3 high-pass at 132.6Hz, 18dB/oct
     x = highpass(x, sr, 132.6, order=3)
-    x = de_ess(x, sr, 0.2)
-    x = saturate(x, drive=1.35, mix=0.16)
-    x = vocal_fx(x, sr)
-    x = high_shelf_like(x, sr, 6200, 0.08)
-    x = band_adjust(x, sr, 180, 500, -0.06)
-    x = ott_style(x, sr, depth=0.22)
-    x = stereo_width(x, width=1.08)
-    x = normalize_rms(x, -13.5)
-    x = limiter(x, ceiling=0.9)
+
+    # De-ess (sibilance gets louder after compression)
+    x = de_ess(x, sr, 0.18)
+
+    # Post shaping: presence lift
+    x = high_shelf_like(x, sr, 7500, 0.14)
+    x = band_adjust(x, sr, 200, 500, -0.04)
+
+    # FX: BPM-synced delays + dual reverb at -20dB
+    x = vocal_fx(x, sr, bpm)
+
+    # Subtle stereo width
+    x = stereo_width(x, 1.06)
 
     return x
+
+
+# ─── INSTRUMENTAL POLISH ─────────────────────────────────────────────────────
 
 
 def instrumental_polish(audio: np.ndarray, sr: int) -> np.ndarray:
@@ -402,11 +406,8 @@ def instrumental_polish(audio: np.ndarray, sr: int) -> np.ndarray:
     x = band_adjust(x, sr, 60, 120, -0.04)
     x = high_shelf_like(x, sr, 6500, 0.055)
     x = saturate(x, drive=1.12, mix=0.08)
-    x = ott_style(x, sr, depth=0.18)
-    x = stereo_width(x, width=1.08)
-    x = compressor_safe(
-        x,
-        sr,
+    x = stereo_width(x, 1.08)
+    x = compressor(x, sr,
         threshold_db=-13.5,
         ratio=1.7,
         attack_ms=18,
@@ -414,8 +415,10 @@ def instrumental_polish(audio: np.ndarray, sr: int) -> np.ndarray:
         makeup_db=0.4,
     )
     x = limiter(x, ceiling=0.92)
-
     return x
+
+
+# ─── FULL MIX POLISH ─────────────────────────────────────────────────────────
 
 
 def full_mix_polish(audio: np.ndarray, sr: int) -> np.ndarray:
@@ -423,11 +426,8 @@ def full_mix_polish(audio: np.ndarray, sr: int) -> np.ndarray:
     x = band_adjust(x, sr, 160, 420, -0.08)
     x = high_shelf_like(x, sr, 7000, 0.07)
     x = saturate(x, drive=1.15, mix=0.10)
-    x = ott_style(x, sr, depth=0.16)
-    x = stereo_width(x, width=1.05)
-    x = compressor_safe(
-        x,
-        sr,
+    x = stereo_width(x, 1.05)
+    x = compressor(x, sr,
         threshold_db=-14.5,
         ratio=1.8,
         attack_ms=20,
@@ -435,8 +435,10 @@ def full_mix_polish(audio: np.ndarray, sr: int) -> np.ndarray:
         makeup_db=0.8,
     )
     x = limiter(x, ceiling=0.92)
-
     return x
+
+
+# ─── FINAL MASTER ────────────────────────────────────────────────────────────
 
 
 def final_master(audio: np.ndarray, sr: int) -> np.ndarray:
@@ -446,11 +448,8 @@ def final_master(audio: np.ndarray, sr: int) -> np.ndarray:
     x = band_adjust(x, sr, 1800, 4800, 0.035)
     x = high_shelf_like(x, sr, 7200, 0.075)
     x = saturate(x, drive=1.18, mix=0.11)
-    x = ott_style(x, sr, depth=0.20)
-    x = stereo_width(x, width=1.07)
-    x = compressor_safe(
-        x,
-        sr,
+    x = stereo_width(x, 1.07)
+    x = compressor(x, sr,
         threshold_db=-15.0,
         ratio=1.9,
         attack_ms=22,
@@ -459,12 +458,10 @@ def final_master(audio: np.ndarray, sr: int) -> np.ndarray:
     )
 
     current = rms_db(x)
-
     if current < -10.5:
         x = normalize_rms(x, -10.5)
     elif current > -8.0:
         x = normalize_rms(x, -8.8)
 
     x = limiter(x, ceiling=0.91)
-
     return x
