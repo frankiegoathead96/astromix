@@ -366,19 +366,19 @@ def vocal_polish(audio: np.ndarray, sr: int, bpm: float = 120.0) -> np.ndarray:
 
     # 1/8 delay: PRIMARY delay with feedback (creates 1/4 and 1/2 echoes naturally)
     # Mono, with HPF 177Hz + notch at 2.47kHz + LPF 4kHz
-    d_eighth = delay_mono(x, sr, eighth_ms, gain=0.10, feedback=0.4)
+    d_eighth = delay_mono(x, sr, eighth_ms, gain=0.16, feedback=0.4)
     d_eighth = highpass(d_eighth, sr, 177, order=3)
     d_eighth = band_cut(d_eighth, sr, 2000, 3000, 0.6)
     d_eighth = lowpass(d_eighth, sr, 4000, order=2)
 
     # 1/4 delay: secondary, quiet
-    d_quarter = delay_mono(x, sr, quarter_ms, gain=0.02)
+    d_quarter = delay_mono(x, sr, quarter_ms, gain=0.035)
     d_quarter = highpass(d_quarter, sr, 177, order=3)
     d_quarter = band_cut(d_quarter, sr, 2000, 3000, 0.6)
     d_quarter = lowpass(d_quarter, sr, 4000, order=2)
 
     # 1/2 delay: very subtle
-    d_half = delay_mono(x, sr, half_ms, gain=0.008)
+    d_half = delay_mono(x, sr, half_ms, gain=0.015)
     d_half = highpass(d_half, sr, 177, order=3)
     d_half = band_cut(d_half, sr, 2000, 3000, 0.6)
     d_half = lowpass(d_half, sr, 4000, order=2)
