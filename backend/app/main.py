@@ -274,8 +274,8 @@ def saturate(audio: np.ndarray, drive: float = 1.25, mix: float = 0.18) -> np.nd
     return (audio * (1.0 - mix) + wet * mix).astype(np.float32)
 
 
-def delay_mono(audio: np.ndarray, sr: int, delay_ms: float, gain: float, feedback: float = 0.0) -> np.ndarray:
-    """Mono delay with feedback. Returns signal as stereo (duplicated L/R)."""
+def delay_mono(audio: np.ndarray, sr: int, delay_ms: float, gain: float, feedback: float = 0.0, hpf_hz: float = 0, lpf_hz: float = 0, notch_lo: float = 0, notch_hi: float = 0, notch_amt: float = 0) -> np.ndarray:
+    """Mono delay with feedback and optional filters. Returns signal as stereo (duplicated L/R)."""
     mono = np.mean(audio, axis=1)
     samples = int(sr * delay_ms / 1000.0)
     out = np.zeros_like(mono)
@@ -290,6 +290,16 @@ def delay_mono(audio: np.ndarray, sr: int, delay_ms: float, gain: float, feedbac
                 if offset >= len(mono) or fb_gain < 0.001:
                     break
                 out[offset:] += mono[:-offset] * fb_gain
+    
+    # Apply filters if specified
+    if hpf_hz > 0:
+        out = np.mean(highpass(np.column_stack([out, out]), sr, hpf_hz, order=3), axis=1)
+    if notch_lo > 0 and notch_hi > 0 and notch_amt > 0:
+        notched = band_cut(np.column_stack([out, out]), sr, notch_lo, notch_hi, notch_amt)
+        out = np.mean(notched, axis=1)
+    if lpf_hz > 0:
+        out = np.mean(lowpass(np.column_stack([out, out]), sr, lpf_hz, order=2), axis=1)
+    
     return np.column_stack([out, out]).astype(np.float32)
 
 
@@ -366,22 +376,13 @@ def vocal_polish(audio: np.ndarray, sr: int, bpm: float = 120.0) -> np.ndarray:
 
     # 1/8 delay: PRIMARY delay with feedback (creates 1/4 and 1/2 echoes naturally)
     # Mono, with HPF 177Hz + notch at 2.47kHz + LPF 4kHz
-    d_eighth = delay_mono(x, sr, eighth_ms, gain=0.16, feedback=0.4)
-    d_eighth = highpass(d_eighth, sr, 177, order=3)
-    d_eighth = band_cut(d_eighth, sr, 2000, 3000, 0.6)
-    d_eighth = lowpass(d_eighth, sr, 4000, order=2)
+    d_eighth = delay_mono(x, sr, eighth_ms, gain=0.16, feedback=0.4, hpf_hz=177, notch_lo=2000, notch_hi=3000, notch_amt=0.6, lpf_hz=4000)
 
     # 1/4 delay: secondary, quiet
-    d_quarter = delay_mono(x, sr, quarter_ms, gain=0.035)
-    d_quarter = highpass(d_quarter, sr, 177, order=3)
-    d_quarter = band_cut(d_quarter, sr, 2000, 3000, 0.6)
-    d_quarter = lowpass(d_quarter, sr, 4000, order=2)
+    d_quarter = delay_mono(x, sr, quarter_ms, gain=0.035, hpf_hz=177, notch_lo=2000, notch_hi=3000, notch_amt=0.6, lpf_hz=4000)
 
     # 1/2 delay: very subtle
-    d_half = delay_mono(x, sr, half_ms, gain=0.015)
-    d_half = highpass(d_half, sr, 177, order=3)
-    d_half = band_cut(d_half, sr, 2000, 3000, 0.6)
-    d_half = lowpass(d_half, sr, 4000, order=2)
+    d_half = delay_mono(x, sr, half_ms, gain=0.015, hpf_hz=177, notch_lo=2000, notch_hi=3000, notch_amt=0.6, lpf_hz=4000)
 
     # Room reverb: short, bright, wide stereo spread
     r1 = reverb_wide(x, sr, [
